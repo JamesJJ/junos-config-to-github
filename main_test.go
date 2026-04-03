@@ -18,11 +18,14 @@ func TestExtractHostname(t *testing.T) {
 		config string
 		want   string
 	}{
-		{"normal", "set system host-name fr1\nset system root-authentication foo", "fr1"},
-		{"mixed case value", "set system host-name FR1-Core", "FR1-Core"},
+		{"set format", "set system host-name fr1\nset system root-authentication foo", "fr1"},
+		{"set mixed case value", "set system host-name FR1-Core", "FR1-Core"},
 		{"missing", "set system root-authentication foo", ""},
-		{"multiple spaces", "set  system  host-name  router1", "router1"},
-		{"mid-config", "set version 1\nset system host-name sw2\nset interfaces ge-0/0/0", "sw2"},
+		{"set multiple spaces", "set  system  host-name  router1", "router1"},
+		{"set mid-config", "set version 1\nset system host-name sw2\nset interfaces ge-0/0/0", "sw2"},
+		{"curly-brace format", "system {\n    host-name fr1;\n    root-authentication {\n    }\n}", "fr1"},
+		{"curly-brace indented", "    host-name my-router.lab;", "my-router.lab"},
+		{"curly-brace no space before semi", "    host-name test;", "test"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

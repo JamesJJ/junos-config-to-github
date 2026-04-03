@@ -29,7 +29,7 @@ import (
 
 var version = "dev"
 
-var hostnameRe = regexp.MustCompile(`(?m)^set\s+system\s+host-name\s+(\S+)`)
+var hostnameRe = regexp.MustCompile(`(?m)(?:^set\s+system\s+host-name\s+(\S+)|^\s*host-name\s+(\S+?)\s*;)`)
 var sanitizeRe = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 
 type stringList []string
@@ -466,10 +466,14 @@ func tryDecompress(data []byte) ([]byte, error) {
 
 func extractHostname(config string) string {
 	m := hostnameRe.FindStringSubmatch(config)
-	if len(m) < 2 {
+	if len(m) < 3 {
 		return ""
 	}
-	return m[1]
+	// Group 1 = set format, Group 2 = curly-brace format
+	if m[1] != "" {
+		return m[1]
+	}
+	return m[2]
 }
 
 func sanitizeHostname(h string) string {
