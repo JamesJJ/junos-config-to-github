@@ -1,10 +1,10 @@
 # junos-config-to-github
 
-HTTP server that receives Junos device configuration archives and commits them directly to a GitHub repository via the GitHub API. No local git checkout or disk writes required.
+HTTP and SCP server that receives Junos device configuration archives and commits them directly to a GitHub repository via the GitHub API. No local git checkout or disk writes required.
 
 ## Features
 
-- Receives gzip-compressed or plain-text Junos configs via HTTP PUT/POST
+- Receives gzip-compressed or plain-text Junos configs via HTTP PUT/POST or SCP
 - Extracts hostname from `set system host-name` in the config
 - Redacts sensitive lines (secrets, passwords, credentials) before committing
 - Commits directly to GitHub using the Contents API (no local git)
@@ -16,14 +16,35 @@ HTTP server that receives Junos device configuration archives and commits them d
 
 ## Usage
 
+HTTP only:
+
 ```
 junos-config-to-github \
   --repo-url https://github.com/youruser/junos-configs \
   --pat-token-file /path/to/pat-token.txt \
-  --port 8000 \
-  --branch main \
-  --retry-interval 900s \
-  --state-dir /var/lib/junos-config-to-github
+  --http-port 8000
+```
+
+SCP only:
+
+```
+junos-config-to-github \
+  --repo-url https://github.com/youruser/junos-configs \
+  --pat-token-file /path/to/pat-token.txt \
+  --scp-port 2222 \
+  --scp-password-file /path/to/scp-password.txt \
+  --scp-host-key /path/to/id_ed25519
+```
+
+Both listeners:
+
+```
+junos-config-to-github \
+  --repo-url https://github.com/youruser/junos-configs \
+  --pat-token-file /path/to/pat-token.txt \
+  --http-port 8000 \
+  --scp-port 2222 \
+  --scp-password-file /path/to/scp-password.txt
 ```
 
 ### CLI Flags
@@ -32,7 +53,10 @@ junos-config-to-github \
 |------|---------|-------------|
 | `--repo-url` | (required) | GitHub repository URL |
 | `--pat-token-file` | (required) | Path to file containing GitHub PAT token |
-| `--port` | `8000` | HTTP listen port |
+| `--http-port` | | HTTP port (enables HTTP listener when set) |
+| `--scp-port` | | SCP/SSH port (enables SCP listener when set) |
+| `--scp-password-file` | | Path to file containing SCP password (required with `--scp-port`) |
+| `--scp-host-key` | `.ssh/id_ed25519` | Path to SSH host key for SCP server |
 | `--branch` | `main` | Git branch to commit to |
 | `--retry-interval` | `900s` | Retry interval for connection-related failures |
 | `--allow-public-repo` | `false` | Allow pushing to public repositories |
@@ -41,7 +65,9 @@ junos-config-to-github \
 | `--remove-redact-term` | | Remove a default redaction term (repeatable) |
 | `--version` | | Print version and exit |
 
-### Endpoints
+At least one of `--http-port` or `--scp-port` must be specified.
+
+### HTTP Endpoints
 
 | Path | Method | Description |
 |------|--------|-------------|
@@ -79,6 +105,7 @@ Customize with `--add-redact-term` and `--remove-redact-term`:
 junos-config-to-github \
   --repo-url https://github.com/youruser/junos-configs \
   --pat-token-file /path/to/pat-token.txt \
+  --http-port 8000 \
   --add-redact-term "community" \
   --add-redact-term "pre-shared-key" \
   --remove-redact-term "local-name"
@@ -103,14 +130,21 @@ kill -HUP $(pidof junos-config-to-github)
 
 ## Junos Configuration
 
-Configure the SRX/Junos device to archive configs on commit:
+### HTTP archival
 
 ```junos
 set system archival configuration transfer-on-commit
 set system archival configuration archive-sites "http://<server-ip>:8000/archive"
 ```
 
-Replace `<server-ip>` with the IP address or hostname of the server running junos-config-to-github.
+### SCP archival
+
+```junos
+set system archival configuration transfer-on-commit
+set system archival configuration archive-sites "scp://<username>:<password>@<server-ip>:2222/archive/"
+```
+
+Replace `<server-ip>` with the IP address or hostname of the server. The SCP username can be anything — only the password is validated.
 
 ## Output
 

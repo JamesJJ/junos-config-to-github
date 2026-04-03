@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +21,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/charmbracelet/ssh"
+	"github.com/charmbracelet/wish"
+	"github.com/charmbracelet/wish/scp"
 )
 
 var version = "dev"
@@ -36,7 +42,10 @@ func (s *stringList) Set(v string) error {
 
 func main() {
 	showVersion := flag.Bool("version", false, "Print version and exit")
-	port := flag.Int("port", 8000, "HTTP port to listen on")
+	httpPort := flag.Int("http-port", 0, "HTTP port to listen on (enables HTTP listener)")
+	scpPort := flag.Int("scp-port", 0, "SCP/SSH port to listen on (enables SCP listener)")
+	scpPasswordFile := flag.String("scp-password-file", "", "Path to file containing SCP password (required when --scp-port is set)")
+	scpHostKeyPath := flag.String("scp-host-key", ".ssh/id_ed25519", "Path to SSH host key for SCP server")
 	repoURL := flag.String("repo-url", "", "GitHub repo URL (required, e.g. https://github.com/user/repo)")
 	patTokenFile := flag.String("pat-token-file", "", "Path to file containing GitHub PAT token (required)")
 	branch := flag.String("branch", "main", "Git branch")
@@ -57,10 +66,28 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+	if *httpPort == 0 && *scpPort == 0 {
+		fmt.Fprintln(os.Stderr, "Error: at least one of --http-port or --scp-port is required")
+		flag.Usage()
+		os.Exit(1)
+	}
+	if *scpPort != 0 && *scpPasswordFile == "" {
+		fmt.Fprintln(os.Stderr, "Error: --scp-password-file is required when --scp-port is set")
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	patToken, err := readTokenFile(*patTokenFile)
 	if err != nil {
 		log.Fatalf("Read PAT token: %v", err)
+	}
+
+	var scpPassword string
+	if *scpPasswordFile != "" {
+		scpPassword, err = readTokenFile(*scpPasswordFile)
+		if err != nil {
+			log.Fatalf("Read SCP password: %v", err)
+		}
 	}
 
 	redactTerms := buildRedactTerms(addTerms, removeTerms)
@@ -68,7 +95,6 @@ func main() {
 
 	var sf *stateFile
 	if *stateDir != "" {
-		var err error
 		sf, err = openStateFile(*stateDir)
 		if err != nil {
 			log.Fatalf("State file: %v", err)
@@ -97,20 +123,7 @@ func main() {
 
 	go pusher.run()
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	http.HandleFunc("/archive", func(w http.ResponseWriter, r *http.Request) {
-		handleUpload(w, r, pusher, redactTerms)
-	})
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	})
-
-	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("version=%s, listening on %s/archive, repo=%s, branch=%s", version, addr, *repoURL, *branch)
-
-	srv := &http.Server{Addr: addr}
+	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	hupCh := make(chan os.Signal, 1)
@@ -126,27 +139,147 @@ func main() {
 			log.Println("SIGHUP: reloaded PAT token")
 		}
 	}()
-	go func() {
-		<-sigCh
-		log.Println("Shutting down...")
-		if sf != nil {
-			pending := pusher.drainPending()
-			if len(pending) > 0 {
-				if err := sf.save(pending); err != nil {
-					log.Printf("Failed to save state: %v", err)
-				} else {
-					log.Printf("Saved %d pending commit(s) to state file", len(pending))
-				}
+
+	// HTTP listener
+	var httpSrv *http.Server
+	if *httpPort != 0 {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		mux.HandleFunc("/archive", func(w http.ResponseWriter, r *http.Request) {
+			handleUpload(w, r, pusher, redactTerms)
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+		httpAddr := fmt.Sprintf(":%d", *httpPort)
+		httpSrv = &http.Server{Addr: httpAddr, Handler: mux}
+		log.Printf("version=%s, HTTP listening on %s/archive, repo=%s, branch=%s", version, httpAddr, *repoURL, *branch)
+		go func() {
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTP server: %v", err)
+			}
+		}()
+	}
+
+	// SCP listener
+	var sshSrv *ssh.Server
+	if *scpPort != 0 {
+		handler := &scpHandler{pusher: pusher, redactTerms: redactTerms}
+		scpAddr := net.JoinHostPort("", fmt.Sprintf("%d", *scpPort))
+		pw := scpPassword
+		sshSrv, err = wish.NewServer(
+			wish.WithAddress(scpAddr),
+			wish.WithHostKeyPath(*scpHostKeyPath),
+			wish.WithPasswordAuth(func(_ ssh.Context, pass string) bool {
+				return pass == pw
+			}),
+			wish.WithMiddleware(scp.Middleware(nil, handler)),
+		)
+		if err != nil {
+			log.Fatalf("SCP server: %v", err)
+		}
+		log.Printf("version=%s, SCP listening on %s, repo=%s, branch=%s", version, scpAddr, *repoURL, *branch)
+		go func() {
+			if err := sshSrv.ListenAndServe(); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+				log.Fatalf("SCP server: %v", err)
+			}
+		}()
+	}
+
+	if *httpPort == 0 && *scpPort == 0 {
+		log.Fatal("No listeners configured")
+	}
+
+	// Wait for shutdown signal
+	<-sigCh
+	log.Println("Shutting down...")
+	if sf != nil {
+		pending := pusher.drainPending()
+		if len(pending) > 0 {
+			if err := sf.save(pending); err != nil {
+				log.Printf("Failed to save state: %v", err)
+			} else {
+				log.Printf("Saved %d pending commit(s) to state file", len(pending))
 			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		srv.Shutdown(ctx)
-	}()
-
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if httpSrv != nil {
+		httpSrv.Shutdown(ctx)
+	}
+	if sshSrv != nil {
+		sshSrv.Shutdown(ctx)
+	}
+}
+
+// SCP handler — receives files from clients
+
+type scpHandler struct {
+	pusher      *githubPusher
+	redactTerms []string
+}
+
+func (h *scpHandler) Mkdir(_ ssh.Session, _ *scp.DirEntry) error {
+	return nil // ignore directory creation
+}
+
+func (h *scpHandler) Write(_ ssh.Session, entry *scp.FileEntry) (int64, error) {
+	data, err := io.ReadAll(entry.Reader)
+	if err != nil {
+		return 0, fmt.Errorf("read SCP file: %w", err)
+	}
+
+	processConfig(data, h.pusher, h.redactTerms)
+	return int64(len(data)), nil
+}
+
+// Shared config processing
+
+func processConfig(data []byte, pusher *githubPusher, redactTerms []string) {
+	content, _ := tryDecompress(data)
+
+	hostname := extractHostname(string(content))
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
+	redacted := redactConfig(string(content), redactTerms)
+
+	now := time.Now().UTC()
+	sanitized := sanitizeHostname(hostname)
+	path := fmt.Sprintf("config-%s.txt", sanitized)
+	msg := fmt.Sprintf("[%s] %s", strings.ToUpper(hostname), now.Format("2006-01-02 15:04:05"))
+
+	pusher.enqueue(commitRequest{
+		path:    path,
+		content: []byte(redacted),
+		message: msg,
+		time:    now,
+	})
+
+	log.Printf("Queued config from %s", strings.ToUpper(hostname))
+}
+
+// HTTP handler
+
+func handleUpload(w http.ResponseWriter, r *http.Request, pusher *githubPusher, redactTerms []string) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Failed to read body: %v", err)
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	processConfig(body, pusher, redactTerms)
+	w.WriteHeader(http.StatusCreated)
 }
 
 // stateFile manages persistent state for pending commits.
@@ -172,7 +305,7 @@ type stateFile struct {
 
 type persistedCommit struct {
 	Path    string `json:"path"`
-	Content string `json:"content"` // base64-encoded
+	Content string `json:"content"`
 	Message string `json:"message"`
 	Time    string `json:"time"`
 }
@@ -196,7 +329,6 @@ func openStateFile(dir string) (*stateFile, error) {
 		return nil, fmt.Errorf("lock state file (another instance running?): %w", err)
 	}
 
-	// Test write
 	if _, err := f.WriteString(""); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("test write to state file: %w", err)
@@ -224,7 +356,6 @@ func (sf *stateFile) load() ([]commitRequest, error) {
 		return nil, fmt.Errorf("decode state file: %w", err)
 	}
 
-	// Truncate immediately after reading
 	if err := sf.file.Truncate(0); err != nil {
 		return nil, fmt.Errorf("truncate state file: %w", err)
 	}
@@ -281,7 +412,7 @@ func (sf *stateFile) close() {
 	sf.file.Close()
 }
 
-// redaction and config parsing
+// Redaction and config parsing
 
 var defaultRedactTerms = []string{"secret", "local-name", "local-password", "encrypted-password"}
 
@@ -320,49 +451,6 @@ func redactConfig(content string, terms []string) string {
 	return strings.Join(out, "\n")
 }
 
-func handleUpload(w http.ResponseWriter, r *http.Request, pusher *githubPusher, redactTerms []string) {
-	if r.Method != http.MethodPut && r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		log.Printf("Failed to read body: %v", err)
-		http.Error(w, "Failed to read body", http.StatusBadRequest)
-		return
-	}
-
-	content, err := tryDecompress(body)
-	if err != nil {
-		log.Printf("Failed to decompress: %v", err)
-		http.Error(w, "Failed to decompress", http.StatusBadRequest)
-		return
-	}
-
-	hostname := extractHostname(string(content))
-	if hostname == "" {
-		hostname = "unknown"
-	}
-
-	redacted := redactConfig(string(content), redactTerms)
-
-	now := time.Now().UTC()
-	sanitized := sanitizeHostname(hostname)
-	path := fmt.Sprintf("config-%s.txt", sanitized)
-	msg := fmt.Sprintf("[%s] %s", strings.ToUpper(hostname), now.Format("2006-01-02 15:04:05"))
-
-	pusher.enqueue(commitRequest{
-		path:    path,
-		content: []byte(redacted),
-		message: msg,
-		time:    now,
-	})
-
-	log.Printf("Queued config from %s", strings.ToUpper(hostname))
-	w.WriteHeader(http.StatusCreated)
-}
-
 func tryDecompress(data []byte) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
@@ -388,7 +476,7 @@ func sanitizeHostname(h string) string {
 	return sanitizeRe.ReplaceAllString(strings.ToLower(h), "_")
 }
 
-// commit queue and GitHub pusher
+// Commit queue and GitHub pusher
 
 type commitRequest struct {
 	path    string
@@ -486,8 +574,6 @@ func (g *githubPusher) enqueue(cr commitRequest) {
 func (g *githubPusher) drainPending() []commitRequest {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-
-	// Drain the queue channel too
 	for {
 		select {
 		case cr := <-g.queue:
