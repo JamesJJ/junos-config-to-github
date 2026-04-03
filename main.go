@@ -45,7 +45,8 @@ func main() {
 	httpPort := flag.Int("http-port", 0, "HTTP port to listen on (enables HTTP listener)")
 	scpPort := flag.Int("scp-port", 0, "SCP/SSH port to listen on (enables SCP listener)")
 	scpPasswordFile := flag.String("scp-password-file", "", "Path to file containing SCP password (required when --scp-port is set)")
-	scpHostKeyPath := flag.String("scp-host-key", ".ssh/id_ed25519", "Path to SSH host key for SCP server")
+	scpUsername := flag.String("scp-username", "archive", "Required SCP username")
+	scpHostKeyPath := flag.String("scp-host-key", ".junos/id_ed25519", "Path to SSH host key for SCP server")
 	repoURL := flag.String("repo-url", "", "GitHub repo URL (required, e.g. https://github.com/user/repo)")
 	patTokenFile := flag.String("pat-token-file", "", "Path to file containing GitHub PAT token (required)")
 	branch := flag.String("branch", "main", "Git branch")
@@ -169,11 +170,12 @@ func main() {
 		handler := &scpHandler{pusher: pusher, redactTerms: redactTerms}
 		scpAddr := net.JoinHostPort("", fmt.Sprintf("%d", *scpPort))
 		pw := scpPassword
+		user := *scpUsername
 		sshSrv, err = wish.NewServer(
 			wish.WithAddress(scpAddr),
 			wish.WithHostKeyPath(*scpHostKeyPath),
-			wish.WithPasswordAuth(func(_ ssh.Context, pass string) bool {
-				return pass == pw
+			wish.WithPasswordAuth(func(ctx ssh.Context, pass string) bool {
+				return ctx.User() == user && pass == pw
 			}),
 			wish.WithMiddleware(scp.Middleware(nil, handler)),
 		)
@@ -181,6 +183,11 @@ func main() {
 			log.Fatalf("SCP server: %v", err)
 		}
 		log.Printf("version=%s, SCP listening on %s, repo=%s, branch=%s", version, scpAddr, *repoURL, *branch)
+		if pubKey, err := os.ReadFile(*scpHostKeyPath + ".pub"); err == nil {
+			keyStr := strings.TrimSpace(string(pubKey))
+			keyStr = strings.Replace(keyStr, "ssh-ed25519", "ed25519-key", 1)
+			log.Printf("SCP host public key: %s", keyStr)
+		}
 		go func() {
 			if err := sshSrv.ListenAndServe(); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 				log.Fatalf("SCP server: %v", err)
@@ -232,13 +239,13 @@ func (h *scpHandler) Write(_ ssh.Session, entry *scp.FileEntry) (int64, error) {
 		return 0, fmt.Errorf("read SCP file: %w", err)
 	}
 
-	processConfig(data, h.pusher, h.redactTerms)
+	processConfig(data, h.pusher, h.redactTerms, entry.Name)
 	return int64(len(data)), nil
 }
 
 // Shared config processing
 
-func processConfig(data []byte, pusher *githubPusher, redactTerms []string) {
+func processConfig(data []byte, pusher *githubPusher, redactTerms []string, scpFilename string) {
 	content, _ := tryDecompress(data)
 
 	hostname := extractHostname(string(content))
@@ -251,7 +258,14 @@ func processConfig(data []byte, pusher *githubPusher, redactTerms []string) {
 	now := time.Now().UTC()
 	sanitized := sanitizeHostname(hostname)
 	path := fmt.Sprintf("config-%s.txt", sanitized)
-	msg := fmt.Sprintf("[%s] %s", strings.ToUpper(hostname), now.Format("2006-01-02 15:04:05"))
+
+	var msg string
+	if scpFilename != "" {
+		safeName := sanitizeRe.ReplaceAllString(scpFilename, "_")
+		msg = fmt.Sprintf("[%s] %s", strings.ToUpper(hostname), safeName)
+	} else {
+		msg = fmt.Sprintf("[%s] %s", strings.ToUpper(hostname), now.Format("2006-01-02 15:04:05"))
+	}
 
 	pusher.enqueue(commitRequest{
 		path:    path,
@@ -278,7 +292,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request, pusher *githubPusher, 
 		return
 	}
 
-	processConfig(body, pusher, redactTerms)
+	processConfig(body, pusher, redactTerms, "")
 	w.WriteHeader(http.StatusCreated)
 }
 
