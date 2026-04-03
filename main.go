@@ -38,7 +38,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	port := flag.Int("port", 8000, "HTTP port to listen on")
 	repoURL := flag.String("repo-url", "", "GitHub repo URL (required, e.g. https://github.com/user/repo)")
-	patToken := flag.String("pat-token", "", "GitHub PAT token (required)")
+	patTokenFile := flag.String("pat-token-file", "", "Path to file containing GitHub PAT token (required)")
 	branch := flag.String("branch", "main", "Git branch")
 	retryInterval := flag.Duration("retry-interval", 900*time.Second, "Retry interval for failed pushes (connection errors)")
 	allowPublic := flag.Bool("allow-public-repo", false, "Allow pushing to public repositories")
@@ -52,10 +52,15 @@ func main() {
 		fmt.Println(version)
 		os.Exit(0)
 	}
-	if *repoURL == "" || *patToken == "" {
-		fmt.Fprintln(os.Stderr, "Error: --repo-url and --pat-token are required")
+	if *repoURL == "" || *patTokenFile == "" {
+		fmt.Fprintln(os.Stderr, "Error: --repo-url and --pat-token-file are required")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	patToken, err := readTokenFile(*patTokenFile)
+	if err != nil {
+		log.Fatalf("Read PAT token: %v", err)
 	}
 
 	redactTerms := buildRedactTerms(addTerms, removeTerms)
@@ -71,7 +76,7 @@ func main() {
 		defer sf.close()
 	}
 
-	pusher := newGitHubPusher(*repoURL, *patToken, *branch, *retryInterval)
+	pusher := newGitHubPusher(*repoURL, patToken, *branch, *retryInterval)
 
 	if err := pusher.checkRepoVisibility(*allowPublic); err != nil {
 		log.Fatalf("Repo visibility check: %v", err)
@@ -108,6 +113,19 @@ func main() {
 	srv := &http.Server{Addr: addr}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	go func() {
+		for range hupCh {
+			t, err := readTokenFile(*patTokenFile)
+			if err != nil {
+				log.Printf("SIGHUP: failed to reload PAT token: %v", err)
+				continue
+			}
+			pusher.setToken(t)
+			log.Println("SIGHUP: reloaded PAT token")
+		}
+	}()
 	go func() {
 		<-sigCh
 		log.Println("Shutting down...")
@@ -132,6 +150,18 @@ func main() {
 }
 
 // stateFile manages persistent state for pending commits.
+
+func readTokenFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("token file %s is empty", path)
+	}
+	return token, nil
+}
 
 const stateFileName = "pending.json"
 
@@ -373,6 +403,7 @@ const minRetry4xx = 7200 * time.Second
 
 type githubPusher struct {
 	apiBase       string
+	tokenMu       sync.RWMutex
 	token         string
 	branch        string
 	retryInterval time.Duration
@@ -393,12 +424,24 @@ func newGitHubPusher(repoURL, token, branch string, retryInterval time.Duration)
 	}
 }
 
+func (g *githubPusher) getToken() string {
+	g.tokenMu.RLock()
+	defer g.tokenMu.RUnlock()
+	return g.token
+}
+
+func (g *githubPusher) setToken(t string) {
+	g.tokenMu.Lock()
+	defer g.tokenMu.Unlock()
+	g.token = t
+}
+
 func (g *githubPusher) checkRepoVisibility(allowPublic bool) error {
 	req, err := http.NewRequest(http.MethodGet, g.apiBase, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Authorization", "Bearer "+g.getToken())
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
@@ -538,7 +581,7 @@ func (g *githubPusher) commit(cr commitRequest) error {
 	if err != nil {
 		return &commitError{err: err, is4xx: false}
 	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Authorization", "Bearer "+g.getToken())
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
@@ -570,7 +613,7 @@ func (g *githubPusher) getFileSHA(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Authorization", "Bearer "+g.getToken())
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 

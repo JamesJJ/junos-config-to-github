@@ -12,16 +12,18 @@ HTTP server that receives Junos device configuration archives and commits them d
 - Automatic retry for failed GitHub pushes
 - Refuses to push to public repos unless explicitly allowed
 - Configurable redaction term list
+- Optional state persistence for pending pushes across restarts
 
 ## Usage
 
 ```
 junos-config-to-github \
   --repo-url https://github.com/youruser/junos-configs \
-  --pat-token ghp_xxxxxxxxxxxx \
+  --pat-token-file /path/to/pat-token.txt \
   --port 8000 \
   --branch main \
-  --retry-interval 30s
+  --retry-interval 900s \
+  --state-dir /var/lib/junos-config-to-github
 ```
 
 ### CLI Flags
@@ -29,10 +31,22 @@ junos-config-to-github \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--repo-url` | (required) | GitHub repository URL |
-| `--pat-token` | (required) | GitHub Personal Access Token |
+| `--pat-token-file` | (required) | Path to file containing GitHub PAT token |
 | `--port` | `8000` | HTTP listen port |
 | `--branch` | `main` | Git branch to commit to |
 | `--retry-interval` | `900s` | Retry interval for connection-related failures |
+| `--allow-public-repo` | `false` | Allow pushing to public repositories |
+| `--state-dir` | | Directory to persist pending pushes across restarts |
+| `--add-redact-term` | | Add a redaction term (repeatable) |
+| `--remove-redact-term` | | Remove a default redaction term (repeatable) |
+| `--version` | | Print version and exit |
+
+### Endpoints
+
+| Path | Method | Description |
+|------|--------|-------------|
+| `/archive` | PUT, POST | Receive Junos config archive |
+| `/health` | GET | Health check |
 
 ### Retry Behavior
 
@@ -49,11 +63,6 @@ When `--state-dir` is specified, pending commits that haven't been pushed to Git
 - An exclusive file lock prevents multiple instances from using the same state directory
 - The state file is truncated to empty immediately after loading pending items into the queue
 - The state file remains empty during normal operation; it is only written during shutdown
-| `--allow-public-repo` | `false` | Allow pushing to public repositories |
-| `--state-dir` | | Directory to persist pending pushes across restarts |
-| `--add-redact-term` | | Add a redaction term (repeatable) |
-| `--remove-redact-term` | | Remove a default redaction term (repeatable) |
-| `--version` | | Print version and exit |
 
 ### Redaction
 
@@ -69,18 +78,11 @@ Customize with `--add-redact-term` and `--remove-redact-term`:
 ```
 junos-config-to-github \
   --repo-url https://github.com/youruser/junos-configs \
-  --pat-token ghp_xxxxxxxxxxxx \
+  --pat-token-file /path/to/pat-token.txt \
   --add-redact-term "community" \
   --add-redact-term "pre-shared-key" \
   --remove-redact-term "local-name"
 ```
-
-### Endpoints
-
-| Path | Method | Description |
-|------|--------|-------------|
-| `/archive` | PUT, POST | Receive Junos config archive |
-| `/health` | GET | Health check |
 
 ## GitHub PAT Token
 
@@ -88,6 +90,14 @@ Create a fine-grained Personal Access Token at https://github.com/settings/token
 
 - Repository access: select the target repo
 - Permissions: Contents (Read and write)
+
+Store the token in a file (e.g. `/etc/junos-config-to-github/pat-token.txt`) and pass the path via `--pat-token-file`.
+
+Send `SIGHUP` to reload the token file without restarting the server (e.g. after rotating the PAT):
+
+```
+kill -HUP $(pidof junos-config-to-github)
+```
 
 ## Junos Configuration
 
