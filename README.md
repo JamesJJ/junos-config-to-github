@@ -89,7 +89,9 @@ junos-config-to-github \
 Create a fine-grained Personal Access Token at https://github.com/settings/tokens with:
 
 - Repository access: select the target repo
-- Permissions: Contents (Read and write)
+- Repository permissions:
+  - Contents: Read and write (commit config files)
+  - Metadata: Read-only (check repo visibility; granted by default)
 
 Store the token in a file (e.g. `/etc/junos-config-to-github/pat-token.txt`) and pass the path via `--pat-token-file`.
 
