@@ -56,13 +56,16 @@ junos-config-to-github \
 | `--http-port` | | HTTP port (enables HTTP listener when set) |
 | `--scp-port` | | SCP/SSH port (enables SCP listener when set) |
 | `--scp-password-file` | | Path to file containing SCP password (required with `--scp-port`) |
-| `--scp-host-key` | `.ssh/id_ed25519` | Path to SSH host key for SCP server |
+| `--scp-username` | `archive` | Required SCP username |
+| `--scp-host-key` | `.junos/id_ed25519` | Path to SSH host key for SCP server |
 | `--branch` | `main` | Git branch to commit to |
 | `--retry-interval` | `900s` | Retry interval for connection-related failures |
 | `--allow-public-repo` | `false` | Allow pushing to public repositories |
 | `--state-dir` | | Directory to persist pending pushes across restarts |
 | `--add-redact-term` | | Add a redaction term (repeatable) |
 | `--remove-redact-term` | | Remove a default redaction term (repeatable) |
+| `--debug` | `false` | Log HTTP headers, SCP details, compressed/uncompressed sizes |
+| `--log-time` | `false` | Include date-time prefix in log messages |
 | `--version` | | Print version and exit |
 
 At least one of `--http-port` or `--scp-port` must be specified.
@@ -141,10 +144,18 @@ set system archival configuration archive-sites "http://<server-ip>:8000/archive
 
 ```junos
 set system archival configuration transfer-on-commit
-set system archival configuration archive-sites "scp://<username>:<password>@<server-ip>:2222/archive/"
+set system archival configuration archive-sites "scp://archive:<password>@<server-ip>:2222/archive/"
 ```
 
-Replace `<server-ip>` with the IP address or hostname of the server. The SCP username can be anything — only the password is validated.
+Replace `<server-ip>` with the IP address or hostname of the server. The username must match `--scp-username` (default `archive`).
+
+### SCP Host Key
+
+The SSH host key is read from `--scp-host-key` (default `.junos/id_ed25519`). If the file doesn't exist, it is auto-generated on first run. The base64 public key is logged at startup for use with Junos `ssh-known-hosts`:
+
+```junos
+set security ssh-known-hosts host <server-ip> ed25519-key <base64-key>
+```
 
 ## Output
 
