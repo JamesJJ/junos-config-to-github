@@ -252,8 +252,21 @@ func (h *scpHandler) Write(s ssh.Session, entry *scp.FileEntry) (int64, error) {
 			s.User(), s.RemoteAddr(), entry.Filepath, entry.Name, entry.Mode, len(data))
 	}
 
-	processConfig(data, h.pusher, h.redactTerms, entry.Name)
+	scpFilename := extractSCPFilename(entry.Filepath, entry.Name)
+	processConfig(data, h.pusher, h.redactTerms, scpFilename)
 	return int64(len(data)), nil
+}
+
+func extractSCPFilename(filepath, name string) string {
+	// Strip the name suffix from filepath, then take the rightmost non-empty segment
+	trimmed := strings.TrimSuffix(filepath, "/"+name)
+	parts := strings.Split(trimmed, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i] != "" {
+			return parts[i]
+		}
+	}
+	return name
 }
 
 // Shared config processing
