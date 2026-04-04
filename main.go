@@ -28,6 +28,7 @@ import (
 )
 
 var version = "dev"
+var debug bool
 
 var hostnameRe = regexp.MustCompile(`(?m)(?:^set\s+system\s+host-name\s+(\S+)|^\s*host-name\s+(\S+?)\s*;)`)
 var sanitizeRe = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
@@ -53,10 +54,17 @@ func main() {
 	retryInterval := flag.Duration("retry-interval", 900*time.Second, "Retry interval for failed pushes (connection errors)")
 	allowPublic := flag.Bool("allow-public-repo", false, "Allow pushing to public repositories")
 	stateDir := flag.String("state-dir", "", "Directory to store state file for pending pushes across restarts")
+	debugFlag := flag.Bool("debug", false, "Enable debug logging")
+	logTime := flag.Bool("log-time", false, "Include date-time prefix in log messages")
 	var addTerms, removeTerms stringList
 	flag.Var(&addTerms, "add-redact-term", "Add a term to the redaction list (repeatable)")
 	flag.Var(&removeTerms, "remove-redact-term", "Remove a term from the default redaction list (repeatable)")
 	flag.Parse()
+
+	if !*logTime {
+		log.SetFlags(0)
+	}
+	debug = *debugFlag
 
 	if *showVersion {
 		fmt.Println(version)
@@ -233,10 +241,15 @@ func (h *scpHandler) Mkdir(_ ssh.Session, _ *scp.DirEntry) error {
 	return nil // ignore directory creation
 }
 
-func (h *scpHandler) Write(_ ssh.Session, entry *scp.FileEntry) (int64, error) {
+func (h *scpHandler) Write(s ssh.Session, entry *scp.FileEntry) (int64, error) {
 	data, err := io.ReadAll(entry.Reader)
 	if err != nil {
 		return 0, fmt.Errorf("read SCP file: %w", err)
+	}
+
+	if debug {
+		log.Printf("[DEBUG] SCP user=%s, remote=%s, filepath=%s, name=%s, mode=%o, compressed_size=%d",
+			s.User(), s.RemoteAddr(), entry.Filepath, entry.Name, entry.Mode, len(data))
 	}
 
 	processConfig(data, h.pusher, h.redactTerms, entry.Name)
@@ -248,9 +261,17 @@ func (h *scpHandler) Write(_ ssh.Session, entry *scp.FileEntry) (int64, error) {
 func processConfig(data []byte, pusher *githubPusher, redactTerms []string, scpFilename string) {
 	content, _ := tryDecompress(data)
 
+	if debug {
+		log.Printf("[DEBUG] compressed_size=%d, uncompressed_size=%d", len(data), len(content))
+	}
+
 	hostname := extractHostname(string(content))
 	if hostname == "" {
 		hostname = "unknown"
+	}
+
+	if debug {
+		log.Printf("[DEBUG] hostname=%s", hostname)
 	}
 
 	redacted := redactConfig(string(content), redactTerms)
@@ -290,6 +311,13 @@ func handleUpload(w http.ResponseWriter, r *http.Request, pusher *githubPusher, 
 		log.Printf("Failed to read body: %v", err)
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
+	}
+
+	if debug {
+		log.Printf("[DEBUG] HTTP %s %s remote=%s content-length=%d", r.Method, r.URL.Path, r.RemoteAddr, len(body))
+		for name, values := range r.Header {
+			log.Printf("[DEBUG] HTTP header %s: %s", name, strings.Join(values, ", "))
+		}
 	}
 
 	processConfig(body, pusher, redactTerms, "")
