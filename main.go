@@ -53,6 +53,7 @@ func main() {
 	branch := flag.String("branch", "main", "Git branch")
 	retryInterval := flag.Duration("retry-interval", 900*time.Second, "Retry interval for failed pushes (connection errors)")
 	allowPublic := flag.Bool("allow-public-repo", false, "Allow pushing to public repositories")
+	repoPath := flag.String("repo-path", "config-${hostname}.txt", "Path template for config files in the repo (use ${hostname} placeholder)")
 	stateDir := flag.String("state-dir", "", "Directory to store state file for pending pushes across restarts")
 	debugFlag := flag.Bool("debug", false, "Enable debug logging")
 	logTime := flag.Bool("log-time", false, "Include date-time prefix in log messages")
@@ -97,6 +98,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("Read SCP password: %v", err)
 		}
+	}
+
+	if !strings.Contains(*repoPath, "${hostname}") {
+		log.Println("WARNING: --repo-path does not contain ${hostname} placeholder; all devices will write to the same file")
 	}
 
 	redactTerms := buildRedactTerms(addTerms, removeTerms)
@@ -157,7 +162,7 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 		})
 		mux.HandleFunc("/archive", func(w http.ResponseWriter, r *http.Request) {
-			handleUpload(w, r, pusher, redactTerms)
+			handleUpload(w, r, pusher, redactTerms, *repoPath)
 		})
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
@@ -175,7 +180,7 @@ func main() {
 	// SCP listener
 	var sshSrv *ssh.Server
 	if *scpPort != 0 {
-		handler := &scpHandler{pusher: pusher, redactTerms: redactTerms}
+		handler := &scpHandler{pusher: pusher, redactTerms: redactTerms, repoPath: *repoPath}
 		scpAddr := net.JoinHostPort("", fmt.Sprintf("%d", *scpPort))
 		pw := scpPassword
 		user := *scpUsername
@@ -235,6 +240,7 @@ func main() {
 type scpHandler struct {
 	pusher      *githubPusher
 	redactTerms []string
+	repoPath    string
 }
 
 func (h *scpHandler) Mkdir(_ ssh.Session, _ *scp.DirEntry) error {
@@ -253,7 +259,7 @@ func (h *scpHandler) Write(s ssh.Session, entry *scp.FileEntry) (int64, error) {
 	}
 
 	scpFilename := extractSCPFilename(entry.Filepath, entry.Name)
-	processConfig(data, h.pusher, h.redactTerms, scpFilename)
+	processConfig(data, h.pusher, h.redactTerms, scpFilename, h.repoPath)
 	return int64(len(data)), nil
 }
 
@@ -271,7 +277,7 @@ func extractSCPFilename(filepath, name string) string {
 
 // Shared config processing
 
-func processConfig(data []byte, pusher *githubPusher, redactTerms []string, scpFilename string) {
+func processConfig(data []byte, pusher *githubPusher, redactTerms []string, scpFilename string, repoPath string) {
 	content, _ := tryDecompress(data)
 
 	if debug {
@@ -291,11 +297,11 @@ func processConfig(data []byte, pusher *githubPusher, redactTerms []string, scpF
 
 	now := time.Now().UTC()
 	sanitized := sanitizeHostname(hostname)
-	path := fmt.Sprintf("config-%s.txt", sanitized)
+	path := strings.ReplaceAll(repoPath, "${hostname}", sanitized)
 
 	var msg string
 	if scpFilename != "" {
-		safeName := sanitizeRe.ReplaceAllString(scpFilename, "_")
+		safeName := sanitizeRe.ReplaceAllString(strings.TrimSuffix(scpFilename, ".gz"), "_")
 		msg = fmt.Sprintf("[%s] %s", strings.ToUpper(hostname), safeName)
 	} else {
 		msg = fmt.Sprintf("[%s] %s", strings.ToUpper(hostname), now.Format("2006-01-02 15:04:05"))
@@ -313,7 +319,7 @@ func processConfig(data []byte, pusher *githubPusher, redactTerms []string, scpF
 
 // HTTP handler
 
-func handleUpload(w http.ResponseWriter, r *http.Request, pusher *githubPusher, redactTerms []string) {
+func handleUpload(w http.ResponseWriter, r *http.Request, pusher *githubPusher, redactTerms []string, repoPath string) {
 	if r.Method != http.MethodPut && r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -333,7 +339,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request, pusher *githubPusher, 
 		}
 	}
 
-	processConfig(body, pusher, redactTerms, "")
+	processConfig(body, pusher, redactTerms, "", repoPath)
 	w.WriteHeader(http.StatusCreated)
 }
 

@@ -59,6 +59,7 @@ junos-config-to-github \
 | `--scp-username` | `archive` | Required SCP username |
 | `--scp-host-key` | `.junos/id_ed25519` | Path to SSH host key for SCP server |
 | `--branch` | `main` | Git branch to commit to |
+| `--repo-path` | `config-${hostname}.txt` | Path template for config files in the repo (`${hostname}` is replaced with the sanitized hostname) |
 | `--retry-interval` | `900s` | Retry interval for connection-related failures |
 | `--allow-public-repo` | `false` | Allow pushing to public repositories |
 | `--state-dir` | | Directory to persist pending pushes across restarts |

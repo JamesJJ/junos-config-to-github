@@ -165,7 +165,7 @@ func TestHandleUpload(t *testing.T) {
 	t.Run("PUT accepted", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPut, "/archive", bytes.NewReader([]byte(config)))
 		w := httptest.NewRecorder()
-		handleUpload(w, req, pusher, terms)
+		handleUpload(w, req, pusher, terms, "config-${hostname}.txt")
 
 		if w.Code != http.StatusCreated {
 			t.Errorf("status = %d, want %d", w.Code, http.StatusCreated)
@@ -186,7 +186,7 @@ func TestHandleUpload(t *testing.T) {
 	t.Run("GET rejected", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/archive", nil)
 		w := httptest.NewRecorder()
-		handleUpload(w, req, pusher, terms)
+		handleUpload(w, req, pusher, terms, "config-${hostname}.txt")
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Errorf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
 		}
@@ -200,7 +200,7 @@ func TestHandleUpload(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPut, "/archive", &buf)
 		w := httptest.NewRecorder()
-		handleUpload(w, req, pusher, terms)
+		handleUpload(w, req, pusher, terms, "config-${hostname}.txt")
 
 		if w.Code != http.StatusCreated {
 			t.Errorf("status = %d, want %d", w.Code, http.StatusCreated)
@@ -214,7 +214,7 @@ func TestHandleUpload(t *testing.T) {
 	t.Run("unknown hostname", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPut, "/archive", bytes.NewReader([]byte("set interfaces ge-0/0/0")))
 		w := httptest.NewRecorder()
-		handleUpload(w, req, pusher, terms)
+		handleUpload(w, req, pusher, terms, "config-${hostname}.txt")
 
 		if w.Code != http.StatusCreated {
 			t.Errorf("status = %d, want %d", w.Code, http.StatusCreated)
